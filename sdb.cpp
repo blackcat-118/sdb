@@ -52,13 +52,16 @@ private:
     vector<pair<int, unsigned char>> mapped_codes;  // mapping to the origin code for each breakpoint
     int breakpoint_cnt = 0;
     pid_t childpid = 0;
-
+    uint64_t end_addr = 0xffffffff;
+    bool syscall_flag = false;
     void print_prompt() {
         cout << "(sdb) ";
     }
     void disasm_code(uint64_t addr) {
-        uint64_t end_addr = 0;
+        
         ZyanU8 data[64] = {'\0'};
+        ZyanU8 exit_pattern[10] = {0xb8, 0x3c, 0x00, 0x00, 0x00, 0x0f, 0x05};
+        int exit_cnt = 0;
         int data_cnt = 0;
         for (int i = 0; i < 8; i++) {
             uint64_t word = ptrace(PTRACE_PEEKTEXT, childpid, addr+data_cnt, NULL);
@@ -69,6 +72,18 @@ private:
             for (int j = 0; j < 8; j++) {
                 // cout << std::hex << (unsigned char)word << " ";
                 data[data_cnt] = word%256;
+                if (word%256 == 0xb8) {
+                    exit_cnt = 1;
+                }
+                else if (word%256 == exit_pattern[exit_cnt]) {
+                    exit_cnt++;
+                }
+                else {
+                    exit_cnt = 0;
+                }
+                if (exit_cnt == 7) {
+                    end_addr = addr+data_cnt;
+                }
                 word /= 256;
                 for (int b = 0; b < (int)breakpoints.size(); b++) {
                     if (addr+data_cnt == breakpoints[b].second) {
@@ -89,7 +104,7 @@ private:
             /* length:          */ sizeof(data) - offset,
             /* instruction:     */ &instruction
         )) && instruction_cnt < 5) {
-            if (runtime_address == end_addr) {
+            if (runtime_address >= end_addr) {
                 break;
             }
             cout << std::hex << setfill(' ') << setw(10) << runtime_address << ": ";
@@ -162,7 +177,7 @@ private:
                 }
             }
             code = ptrace(PTRACE_PEEKTEXT, childpid, cur_addr-0x02, NULL);
-            if ((uint16_t)code == 0x050f) {
+            if ((uint16_t)code == 0x050f && syscall_flag) {
                 auto opcode = ptrace(PTRACE_PEEKUSER, childpid, sizeof(uint64_t) * ORIG_RAX, NULL);
                 auto ret = ptrace(PTRACE_PEEKUSER, childpid, sizeof(uint64_t) * RAX, NULL);
                 uint64_t addr = cur_addr - 0x02;
@@ -174,6 +189,7 @@ private:
                     cout << "** leave a syscall(" << std::dec << opcode << ") = " << ret << " at " << std::hex << addr << "." << endl;
                     disasm_code(addr);
                 }
+                syscall_flag = false;
                 return;
             }
             // step but no breakpoint
@@ -349,6 +365,7 @@ private:
         uint64_t hex_addr;
         int nr;
         int ret;
+        syscall_flag = true;
         ptrace(PTRACE_SYSCALL, childpid, NULL, NULL);
         check_interrupt();
     }
